@@ -355,32 +355,201 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
             throw err;
           });
           
-          if (res.data.code !== 0) {
-            logger.error(`Retry failed: ${JSON.stringify(res.data)}`);
-            continue;
+async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
+  logger.step(`Starting Auto Referral - Creating ${count} wallets`);
+  
+  const wallets = [];
+  
+  for (let i = 1; i <= count; i++) {
+    const wallet = ethers.Wallet.createRandom();
+    const address = wallet.address;
+    const privateKey = wallet.privateKey;
+    
+    logger.loading(`[${i}/${count}] Creating wallet: ${address.substring(0, 10)}...`);
+    
+    const ua = randomUA();
+    const proxy = getRandomProxy();
+    const api = createAxios(proxy, ua);
+
+    try {
+      // Langkah 1: Get nonce dengan headers yang lebih lengkap
+      logger.loading('Step 1: Getting nonce...');
+      let res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
+        headers: { 
+          ...api.defaults.headers,
+          'Origin': 'https://blockstreet.money',
+          'Referer': 'https://blockstreet.money/',
+          'Cookie': 'gfsessionid=',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache'
+        }
+      });
+      
+      const sessionId = extractSessionId(res);
+      const nonce = res.data.data.signnonce;
+      
+      logger.info(`Got nonce: ${nonce.substring(0, 10)}...`);
+      logger.info(`Session ID: ${sessionId || 'none'}`);
+
+      // Langkah 2: Buat signature
+      logger.loading('Step 2: Creating signature...');
+      const now = new Date();
+      const issuedAt = now.toISOString();
+      const expirationTime = new Date(now.getTime() + 120000).toISOString();
+      
+      const message = `blockstreet.money wants you to sign in with your Ethereum account:\n${address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
+      const signature = await wallet.signMessage(message);
+      
+      logger.success('Signature created');
+
+      // Langkah 3: Solve captcha
+      logger.loading('Step 3: Solving captcha...');
+      const token = await solve2Captcha(apikey, sitekey, pageurl);
+      
+      // Langkah 4: Tunggu lebih lama sebelum registration
+      logger.info('Waiting 5 seconds before registration...');
+      await sleep(5000);
+
+      // Langkah 5: Registration dengan retry logic yang lebih baik
+      const body = {
+        address,
+        nonce,
+        signature,
+        chainId: 1,
+        issuedAt,
+        expirationTime,
+        invite_code: inviteCode,
+        'cf-turnstile-response': token
+      };
+      
+      const postHeaders = {
+        ...api.defaults.headers,
+        'Content-Type': 'application/json',
+        'Origin': 'https://blockstreet.money',
+        'Referer': 'https://blockstreet.money/',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Cf-Turnstile-Response': token,
+        'Cookie': sessionId ? `gfsessionid=${sessionId}` : 'gfsessionid='
+      };
+      
+      logger.loading('Step 4: Sending registration...');
+      
+      let maxRetries = 3;
+      let registered = false;
+      let currentNonce = nonce;
+      let currentSignature = signature;
+      let currentToken = token;
+      let currentSessionId = sessionId;
+      
+      for (let attempt = 1; attempt <= maxRetries && !registered; attempt++) {
+        try {
+          logger.loading(`Registration attempt ${attempt}/${maxRetries}...`);
+          
+          const registerBody = {
+            address,
+            nonce: currentNonce,
+            signature: currentSignature,
+            chainId: 1,
+            issuedAt,
+            expirationTime,
+            invite_code: inviteCode,
+            'cf-turnstile-response': currentToken
+          };
+          
+          res = await axios.post('https://api.blockstreet.money/api/account/signverify', 
+            registerBody, 
+            { 
+              headers: {
+                ...postHeaders,
+                'Cf-Turnstile-Response': currentToken,
+                'Cookie': currentSessionId ? `gfsessionid=${currentSessionId}` : 'gfsessionid='
+              },
+              timeout: 30000
+            }
+          );
+          
+          if (res.data.code === 0) {
+            registered = true;
+            const newSessionId = extractSessionId(res);
+            const finalSessionId = newSessionId || currentSessionId;
+
+            logger.success(`[${i}/${count}] ✅ Registered: ${address}`);
+            logger.info(`Final Session ID: ${finalSessionId}`);
+            
+            const walletData = { address, privateKey, sessionId: finalSessionId };
+            wallets.push(walletData);
+            
+            const existingWallets = fs.existsSync('wallets.json') 
+              ? JSON.parse(fs.readFileSync('wallets.json', 'utf8')) 
+              : [];
+            existingWallets.push(walletData);
+            fs.writeFileSync('wallets.json', JSON.stringify(existingWallets, null, 2));
+            
+          } else if (res.data.code === 5020 && attempt < maxRetries) {
+            logger.warn(`Error 5020 on attempt ${attempt} - Getting fresh session...`);
+            
+            // Tunggu lebih lama
+            await sleep(8000);
+            
+            // Get fresh nonce dan session
+            logger.loading('Getting fresh nonce and session...');
+            res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
+              headers: { 
+                ...api.defaults.headers,
+                'Origin': 'https://blockstreet.money',
+                'Referer': 'https://blockstreet.money/',
+                'Cookie': 'gfsessionid=',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+              }
+            });
+            
+            currentSessionId = extractSessionId(res);
+            currentNonce = res.data.data.signnonce;
+            
+            logger.info(`New nonce: ${currentNonce.substring(0, 10)}...`);
+            logger.info(`New session: ${currentSessionId || 'none'}`);
+            
+            // Create new signature
+            const newMessage = `blockstreet.money wants you to sign in with your Ethereum account:\n${address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${currentNonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
+            currentSignature = await wallet.signMessage(newMessage);
+            
+            // Get new captcha token
+            logger.loading('Getting new captcha token...');
+            currentToken = await solve2Captcha(apikey, sitekey, pageurl);
+            
+            // Tunggu sebelum retry
+            await sleep(5000);
+            
+          } else {
+            logger.error(`Registration failed: ${JSON.stringify(res.data)}`);
+            break;
           }
-        } else {
-          continue;
+          
+        } catch (err) {
+          logger.error(`Attempt ${attempt} error: ${err.message}`);
+          if (err.response) {
+            logger.error(`Response: ${JSON.stringify(err.response.data)}`);
+          }
+          
+          if (attempt < maxRetries) {
+            logger.warn(`Retrying in 10 seconds...`);
+            await sleep(10000);
+          }
         }
       }
-
-      const newSessionId = extractSessionId(res);
-      const finalSessionId = newSessionId || sessionId;
-
-      logger.success(`[${i}/${count}] ✅ Registered: ${address}`);
-      logger.info(`Session ID: ${finalSessionId}`);
       
-      const walletData = { address, privateKey, sessionId: finalSessionId };
-      wallets.push(walletData);
-      
-      const existingWallets = fs.existsSync('wallets.json') ? JSON.parse(fs.readFileSync('wallets.json', 'utf8')) : [];
-      existingWallets.push(walletData);
-      fs.writeFileSync('wallets.json', JSON.stringify(existingWallets, null, 2));
-      
-      if (i < count) {
-        logger.info('Waiting 5 seconds before next wallet...');
-        await sleep(5000);
+      if (!registered) {
+        logger.error(`Failed to register wallet after ${maxRetries} attempts`);
       }
+      
+      // Tunggu sebelum wallet berikutnya
+      if (i < count) {
+        logger.info('Waiting 10 seconds before next wallet...');
+        await sleep(10000);
+      }
+      
     } catch (err) {
       logger.error(`Error for wallet ${i}: ${err.message}`);
       if (err.response) {
