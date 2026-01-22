@@ -730,4 +730,63 @@ async function main() {
     const pageurl = 'https://blockstreet.money/dashboard';
 
     while (true) {
-      console.
+      console.log(`\n${colors.cyan}${colors.bold}Select Menu:${colors.reset}`);
+      console.log(`${colors.white}1. Auto Referral (Create new wallets)${colors.reset}`);
+      console.log(`${colors.white}2. Login & Auto Swap${colors.reset}`);
+      console.log(`${colors.white}3. Run All Features (Swap, Supply, Borrow, Repay, Withdraw)${colors.reset}`);
+      console.log(`${colors.white}4. Run All Features - Loop Mode (12h interval)${colors.reset}`);
+      console.log(`${colors.white}5. Test API Endpoint${colors.reset}`);
+      console.log(`${colors.white}6. Exit${colors.reset}\n`);
+
+      const choice = await question(`${colors.cyan}Enter your choice (1-6): ${colors.reset}`);
+
+      switch (choice.trim()) {
+        case '1':
+          if (!inviteCode) {
+            logger.error('Invite code not found!');
+            logger.error('Please add it to:');
+            logger.error('  - code.txt file, OR');
+            logger.error('  - .env file as INVITE_CODE=your_code');
+            break;
+          }
+          const count = await question(`${colors.cyan}How many wallets to create? ${colors.reset}`);
+          await autoReferral(inviteCode, apikey, sitekey, pageurl, parseInt(count));
+          break;
+
+        case '2':
+          await loginAndSwap(apikey, sitekey, pageurl);
+          break;
+
+        case '3':
+          await runAllFeatures(apikey, sitekey, pageurl, false);
+          break;
+
+        case '4':
+          await runAllFeatures(apikey, sitekey, pageurl, true);
+          break;
+
+        case '5':
+          await testEndpoint();
+          break;
+
+        case '6':
+          logger.info('Goodbye!');
+          rl.close();
+          return;
+
+        default:
+          logger.warn('Invalid choice! Please select 1-6.');
+      }
+
+      await sleep(2000);
+    }
+  } catch (err) {
+    logger.error(`Fatal error: ${err.message}`);
+    rl.close();
+  }
+}
+
+main().catch(err => {
+  logger.error(`Unhandled error: ${err.message}`);
+  process.exit(1);
+});
