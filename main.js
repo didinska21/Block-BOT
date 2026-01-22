@@ -3,6 +3,9 @@ const axios = require('axios');
 const { ethers } = require('ethers');
 const readline = require('readline');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const colors = {
   reset: '\x1b[0m',
@@ -282,40 +285,50 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
   return wallets;
 }
 
-// Load Wallets from wallets.json or privatekeys.txt
+// Load Wallets from .env or wallets.json
 function loadWallets() {
   let wallets = [];
   
-  // Try to load from wallets.json first
-  if (fs.existsSync('wallets.json')) {
-    wallets = JSON.parse(fs.readFileSync('wallets.json', 'utf8'));
-    logger.info(`Loaded ${wallets.length} wallet(s) from wallets.json`);
-    return wallets;
-  }
+  // Priority 1: Load from .env file
+  const envKeys = Object.keys(process.env).filter(key => key.startsWith('PRIVATE_KEY_'));
   
-  // If not found, try privatekeys.txt
-  if (fs.existsSync('privatekeys.txt')) {
-    const lines = fs.readFileSync('privatekeys.txt', 'utf8').trim().split('\n').filter(Boolean);
-    wallets = lines.map(pk => {
+  if (envKeys.length > 0) {
+    wallets = envKeys.map(key => {
       try {
-        const wallet = new ethers.Wallet(pk.trim());
+        const wallet = new ethers.Wallet(process.env[key]);
         return {
           address: wallet.address,
           privateKey: wallet.privateKey,
-          sessionId: null
+          sessionId: null,
+          wallet: wallet
         };
       } catch (err) {
-        logger.error(`Invalid private key: ${pk.substring(0, 10)}...`);
+        logger.error(`Invalid private key in ${key}`);
         return null;
       }
     }).filter(Boolean);
     
-    logger.info(`Loaded ${wallets.length} wallet(s) from privatekeys.txt`);
+    logger.info(`Loaded ${wallets.length} wallet(s) from .env file`);
+    return wallets;
+  }
+  
+  // Priority 2: Load from wallets.json (from Auto Referral)
+  if (fs.existsSync('wallets.json')) {
+    const jsonWallets = JSON.parse(fs.readFileSync('wallets.json', 'utf8'));
+    wallets = jsonWallets.map(w => {
+      try {
+        const wallet = new ethers.Wallet(w.privateKey);
+        return {
+          ...w,
+          wallet: wallet
+        };
+      } catch (err) {
+        logger.error(`Invalid wallet in wallets.json: ${w.address}`);
+        return null;
+      }
+    }).filter(Boolean);
     
-    // Save to wallets.json for future use
-    fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
-    logger.success('Saved to wallets.json');
-    
+    logger.info(`Loaded ${wallets.length} wallet(s) from wallets.json`);
     return wallets;
   }
   
@@ -330,8 +343,8 @@ async function loginAndSwap(apikey, sitekey, pageurl) {
   
   if (wallets.length === 0) {
     logger.error('No wallets found! Please:');
-    logger.error('1. Run Auto Referral (Menu 1), OR');
-    logger.error('2. Create privatekeys.txt with your private keys');
+    logger.error('1. Run Auto Referral (Menu 1) to create new wallets, OR');
+    logger.error('2. Add private keys to .env file (PRIVATE_KEY_1, PRIVATE_KEY_2, ...)');
     return;
   }
   
@@ -417,8 +430,8 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
     
     if (wallets.length === 0) {
       logger.error('No wallets found! Please:');
-      logger.error('1. Run Auto Referral (Menu 1), OR');
-      logger.error('2. Create privatekeys.txt with your private keys');
+      logger.error('1. Run Auto Referral (Menu 1) to create new wallets, OR');
+      logger.error('2. Add private keys to .env file (PRIVATE_KEY_1, PRIVATE_KEY_2, ...)');
       return;
     }
     
@@ -609,11 +622,14 @@ async function main() {
   const question = (query) => new Promise(resolve => rl.question(query, resolve));
 
   try {
-    const inviteCode = fs.existsSync('code.txt') ? fs.readFileSync('code.txt', 'utf8').trim() : '';
-    const apikey = fs.existsSync('key.txt') ? fs.readFileSync('key.txt', 'utf8').trim() : '';
+    const inviteCode = process.env.INVITE_CODE || (fs.existsSync('code.txt') ? fs.readFileSync('code.txt', 'utf8').trim() : '');
+    const apikey = process.env.CAPTCHA_API_KEY || (fs.existsSync('key.txt') ? fs.readFileSync('key.txt', 'utf8').trim() : '');
     
     if (!apikey) {
-      logger.error('2Captcha API key not found! Please add it to key.txt');
+      logger.error('2Captcha API key not found!');
+      logger.error('Please add it to:');
+      logger.error('  - key.txt file, OR');
+      logger.error('  - .env file as CAPTCHA_API_KEY=your_key');
       rl.close();
       return;
     }
@@ -634,7 +650,10 @@ async function main() {
 
       if (choice === '1') {
         if (!inviteCode) {
-          logger.error('Invite code not found! Please add it to code.txt');
+          logger.error('Invite code not found!');
+          logger.error('Please add it to:');
+          logger.error('  - code.txt file, OR');
+          logger.error('  - .env file as INVITE_CODE=your_code');
           continue;
         }
         
