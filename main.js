@@ -4,6 +4,7 @@ const { ethers } = require('ethers');
 const axios = require('axios');
 const readline = require('readline');
 const dotenv = require('dotenv');
+const path = require('path');
 
 dotenv.config();
 
@@ -23,16 +24,37 @@ const logger = {
   error: (msg) => console.log(`${colors.red}[✗] ${msg}${colors.reset}`),
   success: (msg) => console.log(`${colors.green}[✅] ${msg}${colors.reset}`),
   loading: (msg) => console.log(`${colors.cyan}[⟳] ${msg}${colors.reset}`),
+  debug: (msg) => console.log(`${colors.yellow}[🔍] ${msg}${colors.reset}`),
   banner: () => {
     console.log(`${colors.cyan}${colors.bold}`);
     console.log(`╔═══════════════════════════════════════════╗`);
     console.log(`║  BlockStreet Auto Referral - VPS Ready   ║`);
+    console.log(`║         With Debug & Screenshots         ║`);
     console.log(`╚═══════════════════════════════════════════╝${colors.reset}\n`);
   },
 };
 
+// Create screenshots directory
+const screenshotDir = path.join(__dirname, 'screenshots');
+if (!fs.existsSync(screenshotDir)) {
+  fs.mkdirSync(screenshotDir);
+}
+
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function takeDebugScreenshot(page, name, walletIndex) {
+  try {
+    const timestamp = Date.now();
+    const filename = `wallet${walletIndex}_${name}_${timestamp}.png`;
+    const filepath = path.join(screenshotDir, filename);
+    await page.screenshot({ path: filepath, fullPage: true });
+    logger.debug(`Screenshot saved: ${filename}`);
+    return filepath;
+  } catch (err) {
+    logger.warn(`Screenshot failed: ${err.message}`);
+  }
 }
 
 async function solve2Captcha(apikey, sitekey, pageurl) {
@@ -101,6 +123,7 @@ async function autoReferral(inviteCode, apikey, count) {
     const privateKey = wallet.privateKey;
     
     logger.loading(`[${i}/${count}] Creating wallet: ${address.substring(0, 12)}...`);
+    logger.debug(`Full address: ${address}`);
     
     const browser = await puppeteer.launch({
       headless: 'new',
@@ -119,13 +142,42 @@ async function autoReferral(inviteCode, apikey, count) {
     try {
       const page = await browser.newPage();
       
+      // Enable console logging from page
+      page.on('console', msg => {
+        const type = msg.type();
+        if (type === 'error') {
+          logger.error(`PAGE ERROR: ${msg.text()}`);
+        } else if (type === 'warning') {
+          logger.warn(`PAGE WARN: ${msg.text()}`);
+        } else {
+          logger.debug(`PAGE: ${msg.text()}`);
+        }
+      });
+      
+      // Log network requests
+      page.on('response', async response => {
+        const url = response.url();
+        if (url.includes('api') || url.includes('register') || url.includes('auth')) {
+          logger.debug(`API Response: ${response.status()} - ${url}`);
+          try {
+            const body = await response.text();
+            if (body.length < 500) {
+              logger.debug(`Response body: ${body}`);
+            }
+          } catch (e) {}
+        }
+      });
+      
       await page.setViewport({ width: 1280, height: 800 });
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
       
-      // Inject Ethereum provider
+      // Inject Ethereum provider with proper signing
       await page.evaluateOnNewDocument((privKey, addr) => {
+        const { ethers } = require('ethers');
+        
         const createProvider = () => {
           let currentAddress = addr;
+          const wallet = new ethers.Wallet(privKey);
           
           return {
             isMetaMask: true,
@@ -156,15 +208,19 @@ async function autoReferral(inviteCode, apikey, count) {
               }
               
               if (method === 'personal_sign') {
-                const message = params[0];
-                const hexMessage = message.startsWith('0x') ? message : message;
-                
-                // Simple signature simulation
-                const msgHash = hexMessage;
-                const signature = '0x' + privKey.substring(2, 66) + 'a'.repeat(64) + '1b';
-                
-                console.log('Signing message:', message);
-                return signature;
+                try {
+                  const message = params[0];
+                  const signature = await wallet.signMessage(
+                    typeof message === 'string' && message.startsWith('0x') 
+                      ? ethers.utils.arrayify(message)
+                      : message
+                  );
+                  console.log('Message signed successfully');
+                  return signature;
+                } catch (err) {
+                  console.error('Signing error:', err);
+                  throw err;
+                }
               }
               
               if (method === 'eth_chainId') {
@@ -172,8 +228,18 @@ async function autoReferral(inviteCode, apikey, count) {
               }
               
               if (method === 'eth_sign') {
-                const signature = '0x' + privKey.substring(2, 66) + 'a'.repeat(64) + '1b';
-                return signature;
+                try {
+                  const message = params[1];
+                  const signature = await wallet.signMessage(
+                    typeof message === 'string' && message.startsWith('0x')
+                      ? ethers.utils.arrayify(message)
+                      : message
+                  );
+                  return signature;
+                } catch (err) {
+                  console.error('Signing error:', err);
+                  throw err;
+                }
               }
               
               if (method === 'wallet_switchEthereumChain') {
@@ -211,6 +277,7 @@ async function autoReferral(inviteCode, apikey, count) {
       });
       
       await sleep(3000);
+      await takeDebugScreenshot(page, '01_initial_page', i);
       
       // Solve captcha with 2Captcha
       logger.loading('Solving captcha...');
@@ -223,113 +290,182 @@ async function autoReferral(inviteCode, apikey, count) {
           input.value = token;
         });
         
-        // Also try to set in window
         window.turnstileToken = token;
         
-        // Dispatch event
         const event = new Event('input', { bubbles: true });
         inputs.forEach(input => input.dispatchEvent(event));
+        
+        console.log('Captcha token injected:', token.substring(0, 20) + '...');
       }, captchaToken);
       
       await sleep(2000);
+      await takeDebugScreenshot(page, '02_after_captcha', i);
       
-      // Click Connect Wallet
+      // Click Connect Wallet with better detection
       logger.loading('Connecting wallet...');
-      const connected = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-        const connectBtn = buttons.find(btn => {
-          const text = btn.textContent.toLowerCase();
-          return text.includes('connect') && (text.includes('wallet') || text.includes('metamask'));
-        });
+      const connectResult = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"]'));
+        console.log('Total buttons found:', buttons.length);
         
-        if (connectBtn) {
-          connectBtn.click();
-          return true;
+        for (let btn of buttons) {
+          const text = btn.textContent.toLowerCase().trim();
+          console.log('Button text:', text);
+          
+          if (text.includes('connect') || text.includes('wallet') || text.includes('metamask')) {
+            console.log('Clicking connect button:', btn.textContent);
+            btn.click();
+            return { success: true, text: btn.textContent };
+          }
         }
-        return false;
+        
+        return { success: false, text: null };
       });
       
-      if (!connected) {
-        logger.warn('Connect button not found, trying alternative method...');
+      logger.debug(`Connect button result: ${JSON.stringify(connectResult)}`);
+      
+      if (!connectResult.success) {
+        logger.warn('Connect button not found!');
+        await takeDebugScreenshot(page, '03_connect_not_found', i);
       }
       
-      await sleep(3000);
+      await sleep(4000);
+      await takeDebugScreenshot(page, '04_after_connect', i);
       
-      // Select MetaMask
+      // Select MetaMask with better detection
       logger.loading('Selecting MetaMask...');
-      await page.evaluate(() => {
+      const metaMaskResult = await page.evaluate(() => {
         const elements = Array.from(document.querySelectorAll('*'));
-        const metaMaskBtn = elements.find(el => {
-          const text = el.textContent.toLowerCase();
-          return text.includes('metamask') || text.includes('browser wallet');
-        });
         
-        if (metaMaskBtn) metaMaskBtn.click();
+        for (let el of elements) {
+          const text = el.textContent.toLowerCase();
+          const hasMetaMask = text.includes('metamask') || text.includes('browser wallet');
+          
+          if (hasMetaMask && el.offsetParent !== null) {
+            console.log('Clicking MetaMask:', el.textContent.substring(0, 50));
+            el.click();
+            return { success: true, text: el.textContent.substring(0, 50) };
+          }
+        }
+        
+        return { success: false };
       });
       
-      await sleep(3000);
+      logger.debug(`MetaMask selection: ${JSON.stringify(metaMaskResult)}`);
+      await sleep(4000);
+      await takeDebugScreenshot(page, '05_after_metamask', i);
       
-      // Enter invite code if field exists
+      // Enter invite code
       logger.loading('Entering invite code...');
-      const inviteEntered = await page.evaluate((code) => {
+      const inviteResult = await page.evaluate((code) => {
         const inputs = Array.from(document.querySelectorAll('input'));
-        const inviteInput = inputs.find(input => {
+        console.log('Total inputs found:', inputs.length);
+        
+        for (let input of inputs) {
           const placeholder = (input.placeholder || '').toLowerCase();
           const name = (input.name || '').toLowerCase();
-          return placeholder.includes('invite') || placeholder.includes('code') || 
-                 placeholder.includes('referral') || name.includes('invite') || name.includes('code');
-        });
-        
-        if (inviteInput) {
-          inviteInput.value = code;
-          inviteInput.dispatchEvent(new Event('input', { bubbles: true }));
-          inviteInput.dispatchEvent(new Event('change', { bubbles: true }));
-          return true;
+          const id = (input.id || '').toLowerCase();
+          
+          console.log('Input:', { placeholder, name, id, type: input.type });
+          
+          if (placeholder.includes('invite') || placeholder.includes('code') || 
+              placeholder.includes('referral') || name.includes('invite') || 
+              name.includes('code') || name.includes('referral') ||
+              id.includes('invite') || id.includes('code')) {
+            
+            console.log('Found invite field, entering code:', code);
+            input.focus();
+            input.value = code;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.blur();
+            return { success: true, field: placeholder || name || id };
+          }
         }
-        return false;
+        
+        return { success: false };
       }, inviteCode);
       
-      if (inviteEntered) {
-        logger.success('Invite code entered');
+      logger.debug(`Invite code entry: ${JSON.stringify(inviteResult)}`);
+      
+      if (inviteResult.success) {
+        logger.success(`Invite code entered in field: ${inviteResult.field}`);
+      } else {
+        logger.warn('Invite code field not found!');
       }
       
       await sleep(2000);
+      await takeDebugScreenshot(page, '06_after_invite', i);
       
       // Click submit/sign button
       logger.loading('Submitting registration...');
-      await page.evaluate(() => {
+      const submitResult = await page.evaluate(() => {
         const buttons = Array.from(document.querySelectorAll('button'));
-        const submitBtn = buttons.find(btn => {
-          const text = btn.textContent.toLowerCase();
-          return text.includes('submit') || text.includes('register') || 
-                 text.includes('sign') || text.includes('continue') || text.includes('confirm');
-        });
+        console.log('Buttons for submit:', buttons.length);
         
-        if (submitBtn && !submitBtn.disabled) {
-          submitBtn.click();
+        for (let btn of buttons) {
+          const text = btn.textContent.toLowerCase().trim();
+          const disabled = btn.disabled;
+          
+          console.log('Submit button candidate:', { text, disabled });
+          
+          if (!disabled && (text.includes('submit') || text.includes('register') || 
+              text.includes('sign') || text.includes('continue') || 
+              text.includes('confirm') || text.includes('join'))) {
+            
+            console.log('Clicking submit button:', btn.textContent);
+            btn.click();
+            return { success: true, text: btn.textContent };
+          }
         }
+        
+        return { success: false };
       });
       
-      await sleep(5000);
+      logger.debug(`Submit result: ${JSON.stringify(submitResult)}`);
+      await sleep(6000);
+      await takeDebugScreenshot(page, '07_after_submit', i);
       
-      // Get session from cookies
+      // Get session and check success
       const cookies = await page.cookies();
       const sessionCookie = cookies.find(c => c.name === 'gfsessionid');
       const sessionId = sessionCookie ? sessionCookie.value : null;
       
-      // Check for success
-      const pageContent = await page.content();
-      const isSuccess = pageContent.includes('dashboard') || 
-                       pageContent.includes('success') || 
-                       sessionId !== null;
+      // More comprehensive success check
+      const successCheck = await page.evaluate(() => {
+        const url = window.location.href;
+        const body = document.body.textContent.toLowerCase();
+        
+        return {
+          url,
+          hasDashboard: body.includes('dashboard') || url.includes('dashboard'),
+          hasSuccess: body.includes('success') || body.includes('welcome'),
+          hasError: body.includes('error') || body.includes('failed'),
+          title: document.title
+        };
+      });
+      
+      logger.debug(`Success check: ${JSON.stringify(successCheck)}`);
+      logger.debug(`Session ID: ${sessionId || 'none'}`);
+      
+      const isSuccess = successCheck.hasDashboard || successCheck.hasSuccess || 
+                       (sessionId !== null && !successCheck.hasError);
+      
+      await takeDebugScreenshot(page, '08_final_state', i);
       
       if (isSuccess) {
-        logger.success(`✅ Wallet registered: ${address}`);
+        logger.success(`✅ Wallet registered successfully!`);
+        logger.success(`Address: ${address}`);
         if (sessionId) {
           logger.info(`Session ID: ${sessionId}`);
         }
         
-        const walletData = { address, privateKey, sessionId };
+        const walletData = { 
+          address, 
+          privateKey, 
+          sessionId,
+          timestamp: new Date().toISOString(),
+          inviteCode 
+        };
         wallets.push(walletData);
         
         const existingWallets = fs.existsSync('wallets.json') 
@@ -338,7 +474,25 @@ async function autoReferral(inviteCode, apikey, count) {
         existingWallets.push(walletData);
         fs.writeFileSync('wallets.json', JSON.stringify(existingWallets, null, 2));
       } else {
-        logger.error('Registration may have failed - check manually');
+        logger.error('Registration failed!');
+        logger.error(`URL: ${successCheck.url}`);
+        logger.error(`Title: ${successCheck.title}`);
+        logger.error('Check screenshots in ./screenshots/ folder');
+        
+        // Save failed attempt
+        const failedData = {
+          address,
+          privateKey,
+          timestamp: new Date().toISOString(),
+          error: 'Registration failed',
+          details: successCheck
+        };
+        
+        const failedWallets = fs.existsSync('failed.json')
+          ? JSON.parse(fs.readFileSync('failed.json', 'utf8'))
+          : [];
+        failedWallets.push(failedData);
+        fs.writeFileSync('failed.json', JSON.stringify(failedWallets, null, 2));
       }
       
       await browser.close();
@@ -351,12 +505,25 @@ async function autoReferral(inviteCode, apikey, count) {
       
     } catch (err) {
       logger.error(`Error: ${err.message}`);
+      logger.error(`Stack: ${err.stack}`);
+      
+      try {
+        await takeDebugScreenshot(page, 'ERROR', i);
+      } catch (e) {}
+      
       await browser.close();
     }
   }
   
-  logger.success(`\nCompleted! Created ${wallets.length}/${count} wallets`);
-  logger.info(`Wallets saved to wallets.json\n`);
+  logger.success(`\n${'='.repeat(50)}`);
+  logger.success(`Completed! Created ${wallets.length}/${count} wallets`);
+  logger.info(`Successful wallets saved to: wallets.json`);
+  if (fs.existsSync('failed.json')) {
+    logger.warn(`Failed attempts saved to: failed.json`);
+  }
+  logger.info(`Screenshots saved to: ./screenshots/`);
+  logger.success(`${'='.repeat(50)}\n`);
+  
   return wallets;
 }
 
@@ -392,7 +559,9 @@ async function main() {
     }
     
     logger.info(`Invite Code: ${inviteCode}`);
-    logger.info(`Running in VPS headless mode\n`);
+    logger.info(`2Captcha API Key: ${apikey.substring(0, 8)}...`);
+    logger.info(`Running in VPS headless mode with debug`);
+    logger.info(`Screenshots will be saved to: ./screenshots/\n`);
     
     const count = await question(`${colors.cyan}How many wallets to create? ${colors.reset}`);
     const numCount = parseInt(count);
@@ -409,6 +578,7 @@ async function main() {
     rl.close();
   } catch (err) {
     logger.error(`Fatal error: ${err.message}`);
+    logger.error(`Stack: ${err.stack}`);
     rl.close();
   }
 }
