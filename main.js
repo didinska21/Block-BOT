@@ -1,8 +1,7 @@
 const fs = require('fs');
-const axios = require('axios');
+const puppeteer = require('puppeteer');
 const { ethers } = require('ethers');
 const readline = require('readline');
-const { HttpsProxyAgent } = require('https-proxy-agent');
 const dotenv = require('dotenv');
 
 dotenv.config();
@@ -26,150 +25,16 @@ const logger = {
   banner: () => {
     console.log(`${colors.cyan}${colors.bold}`);
     console.log(`╔═══════════════════════════════════════════╗`);
-    console.log(`║     BlockStreet Auto Referral Bot        ║`);
+    console.log(`║  BlockStreet Auto Referral - Puppeteer   ║`);
     console.log(`╚═══════════════════════════════════════════╝${colors.reset}\n`);
   },
 };
-
-const userAgents = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
-];
-
-function randomUA() {
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
-}
-
-let proxyList = [];
-let usingProxy = false;
-
-function initializeProxy() {
-  try {
-    const proxies = fs.readFileSync('proxies.txt', 'utf8').trim().split('\n').filter(Boolean);
-    if (proxies.length > 0) {
-      proxyList = proxies.map(p => parseProxy(p.trim()));
-      usingProxy = true;
-      logger.info(`Loaded ${proxyList.length} proxy(ies)`);
-    } else {
-      logger.warn('No proxies found, running without proxy');
-    }
-  } catch (err) {
-    logger.warn('No proxies.txt found, running without proxy');
-  }
-}
-
-function getRandomProxy() {
-  if (!usingProxy || proxyList.length === 0) return null;
-  return proxyList[Math.floor(Math.random() * proxyList.length)];
-}
-
-function parseProxy(proxyLine) {
-  let proxy = proxyLine.trim();
-  proxy = proxy.replace(/^https?:\/\//, '');
-  
-  if (proxy.match(/^[^:]+:[^@]+@[^:]+:\d+$/)) {
-    return `http://${proxy}`;
-  }
-  
-  const parts = proxy.split(':');
-  if (parts.length === 4) {
-    const [host, port, user, pass] = parts;
-    if (!isNaN(port)) {
-      return `http://${user}:${pass}@${host}:${port}`;
-    }
-  }
-  
-  if (parts.length === 2 && !isNaN(parts[1])) {
-    return `http://${proxy}`;
-  }
-  
-  return `http://${proxy}`;
-}
-
-function createAxios(proxy = null, ua) {
-  const config = {
-    headers: {
-      'User-Agent': ua,
-      'Accept': 'application/json, text/plain, */*',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Referer': 'https://blockstreet.money/',
-    },
-  };
-  if (proxy) {
-    config.httpsAgent = new HttpsProxyAgent(proxy);
-  }
-  return axios.create(config);
-}
-
-function extractSessionId(response) {
-  const setCookies = response.headers['set-cookie'];
-  if (setCookies && setCookies.length > 0) {
-    const cookieStr = setCookies[0].split(';')[0];
-    const parts = cookieStr.split('=');
-    if (parts[0].trim() === 'gfsessionid') {
-      return parts[1];
-    }
-  }
-  return null;
-}
-
-async function solve2Captcha(apikey, sitekey, pageurl) {
-  logger.loading('Solving Turnstile with 2Captcha...');
-  
-  const submitUrl = 'https://2captcha.com/in.php';
-  const params = new URLSearchParams({
-    key: apikey,
-    method: 'turnstile',
-    sitekey: sitekey,
-    pageurl: pageurl,
-    json: 1
-  });
-  
-  let submitRes = await axios.post(submitUrl, params);
-  
-  if (submitRes.data.status !== 1) {
-    throw new Error(`2Captcha submit failed: ${submitRes.data.request}`);
-  }
-  
-  const taskId = submitRes.data.request;
-  logger.info(`Task ID: ${taskId}`);
-
-  const resUrl = 'https://2captcha.com/res.php';
-  let attempts = 0;
-  
-  while (attempts < 60) {
-    await sleep(5000);
-    
-    const resParams = new URLSearchParams({
-      key: apikey,
-      action: 'get',
-      id: taskId,
-      json: 1
-    });
-    
-    let resRes = await axios.get(resUrl + '?' + resParams.toString());
-    
-    if (resRes.data.status === 1) {
-      logger.success('Captcha solved!');
-      return resRes.data.request;
-    } else if (resRes.data.request === 'CAPCHA_NOT_READY') {
-      attempts++;
-      logger.loading(`Waiting for captcha... (${attempts}/60)`);
-      continue;
-    } else {
-      throw new Error(`2Captcha failed: ${resRes.data.request}`);
-    }
-  }
-  
-  throw new Error('Captcha timeout');
-}
 
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
+async function autoReferral(inviteCode, count, headless = false) {
   logger.info(`Starting Auto Referral - Creating ${count} wallet(s)\n`);
   
   const wallets = [];
@@ -181,127 +46,204 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
     
     logger.loading(`[${i}/${count}] Creating wallet: ${address.substring(0, 12)}...`);
     
-    const ua = randomUA();
-    const proxy = getRandomProxy();
-    const api = createAxios(proxy, ua);
+    const browser = await puppeteer.launch({
+      headless: headless,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu'
+      ]
+    });
 
     try {
-      // Step 1: Get nonce
-      logger.loading('Getting nonce...');
-      let res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
-        headers: { 
-          'Origin': 'https://blockstreet.money',
-          'Cookie': 'gfsessionid='
+      const page = await browser.newPage();
+      
+      // Set viewport
+      await page.setViewport({ width: 1280, height: 800 });
+      
+      // Block unnecessary resources
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        if(['image', 'stylesheet', 'font'].includes(req.resourceType())){
+          req.abort();
+        } else {
+          req.continue();
         }
       });
       
-      let sessionId = extractSessionId(res);
-      let nonce = res.data.data.signnonce;
+      logger.loading('Opening BlockStreet...');
+      await page.goto('https://blockstreet.money/dashboard', {
+        waitUntil: 'networkidle2',
+        timeout: 60000
+      });
       
-      logger.info(`Nonce: ${nonce.substring(0, 15)}...`);
-
-      // Step 2: Create signature
-      const now = new Date();
-      const issuedAt = now.toISOString();
-      const expirationTime = new Date(now.getTime() + 120000).toISOString();
+      await sleep(3000);
       
-      const message = `blockstreet.money wants you to sign in with your Ethereum account:\n${address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
-      let signature = await wallet.signMessage(message);
-
-      // Step 3: Solve captcha
-      let token = await solve2Captcha(apikey, sitekey, pageurl);
-
-      // Step 4: Wait before registration
-      logger.info('Waiting 5 seconds...');
+      // Click Connect Wallet button
+      logger.loading('Clicking Connect Wallet...');
+      await page.waitForSelector('button:has-text("Connect Wallet"), button:has-text("Connect"), [class*="connect"]', { timeout: 10000 });
+      await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const connectBtn = buttons.find(btn => 
+          btn.textContent.includes('Connect') || 
+          btn.textContent.includes('Wallet')
+        );
+        if (connectBtn) connectBtn.click();
+      });
+      
+      await sleep(2000);
+      
+      // Select MetaMask or wallet option
+      logger.loading('Selecting wallet type...');
+      await page.evaluate(() => {
+        const elements = Array.from(document.querySelectorAll('*'));
+        const metaMaskBtn = elements.find(el => 
+          el.textContent.includes('MetaMask') ||
+          el.textContent.includes('Browser Wallet') ||
+          el.textContent.includes('Injected')
+        );
+        if (metaMaskBtn) metaMaskBtn.click();
+      });
+      
+      await sleep(2000);
+      
+      // Inject wallet
+      logger.loading('Injecting wallet...');
+      await page.evaluateOnNewDocument((privKey) => {
+        window.ethereum = {
+          isMetaMask: true,
+          request: async ({ method, params }) => {
+            if (method === 'eth_requestAccounts' || method === 'eth_accounts') {
+              const ethers = require('ethers');
+              const wallet = new ethers.Wallet(privKey);
+              return [wallet.address];
+            }
+            if (method === 'personal_sign') {
+              const ethers = require('ethers');
+              const wallet = new ethers.Wallet(privKey);
+              const message = params[0];
+              return await wallet.signMessage(message);
+            }
+            if (method === 'eth_chainId') {
+              return '0x1';
+            }
+            return null;
+          },
+          selectedAddress: null,
+          chainId: '0x1',
+        };
+      }, privateKey);
+      
+      // Wait for page to process
+      logger.loading('Processing authentication...');
       await sleep(5000);
-
-      // Step 5: Registration with retry
-      let registered = false;
-      let maxRetries = 3;
       
-      for (let attempt = 1; attempt <= maxRetries && !registered; attempt++) {
-        try {
-          logger.loading(`Registration attempt ${attempt}/${maxRetries}...`);
-          
-          const body = {
-            address,
-            nonce,
-            signature,
-            chainId: 1,
-            issuedAt,
-            expirationTime,
-            invite_code: inviteCode,
-            'cf-turnstile-response': token
-          };
-          
-          res = await axios.post('https://api.blockstreet.money/api/account/signverify', body, { 
-            headers: {
-              'Content-Type': 'application/json',
-              'Origin': 'https://blockstreet.money',
-              'Referer': 'https://blockstreet.money/',
-              'User-Agent': ua,
-              'Cookie': sessionId ? `gfsessionid=${sessionId}` : 'gfsessionid='
-            },
-            timeout: 30000
-          });
-          
-          if (res.data.code === 0) {
-            registered = true;
-            const newSessionId = extractSessionId(res);
-            const finalSessionId = newSessionId || sessionId;
-
-            logger.success(`✅ Wallet registered: ${address}`);
-            
-            const walletData = { address, privateKey, sessionId: finalSessionId };
-            wallets.push(walletData);
-            
-            const existingWallets = fs.existsSync('wallets.json') 
-              ? JSON.parse(fs.readFileSync('wallets.json', 'utf8')) 
-              : [];
-            existingWallets.push(walletData);
-            fs.writeFileSync('wallets.json', JSON.stringify(existingWallets, null, 2));
-            
-          } else if (res.data.code === 5020 && attempt < maxRetries) {
-            logger.warn(`Error 5020 - Refreshing session...`);
-            await sleep(8000);
-            
-            // Get fresh nonce
-            res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
-              headers: { 
-                'Origin': 'https://blockstreet.money',
-                'Cookie': 'gfsessionid='
-              }
-            });
-            
-            sessionId = extractSessionId(res);
-            nonce = res.data.data.signnonce;
-            
-            // New signature
-            const newMessage = `blockstreet.money wants you to sign in with your Ethereum account:\n${address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
-            signature = await wallet.signMessage(newMessage);
-            
-            // New captcha
-            token = await solve2Captcha(apikey, sitekey, pageurl);
-            await sleep(5000);
-            
-          } else {
-            logger.error(`Failed: ${res.data.message}`);
-            break;
+      // Look for invite code input
+      logger.loading('Looking for invite code field...');
+      const inviteInputs = await page.$$('input[placeholder*="code"], input[placeholder*="invite"], input[placeholder*="referral"]');
+      
+      if (inviteInputs.length > 0) {
+        logger.loading('Entering invite code...');
+        await inviteInputs[0].type(inviteCode, { delay: 100 });
+        await sleep(1000);
+      }
+      
+      // Wait for Turnstile captcha to appear
+      logger.loading('Waiting for captcha...');
+      logger.warn('⚠️  PLEASE SOLVE THE CAPTCHA MANUALLY IN THE BROWSER!');
+      logger.info('Waiting up to 120 seconds for captcha to be solved...');
+      
+      // Wait for captcha iframe
+      await page.waitForSelector('iframe[src*="turnstile"]', { timeout: 30000 });
+      
+      // Wait for captcha to be solved (check if submit button becomes enabled or captcha disappears)
+      let captchaSolved = false;
+      let attempts = 0;
+      while (!captchaSolved && attempts < 120) {
+        await sleep(1000);
+        attempts++;
+        
+        // Check if captcha iframe still exists
+        const captchaExists = await page.$('iframe[src*="turnstile"]');
+        if (!captchaExists) {
+          captchaSolved = true;
+          logger.success('Captcha solved!');
+          break;
+        }
+        
+        // Check if there's a success indicator
+        const successIndicator = await page.evaluate(() => {
+          const iframe = document.querySelector('iframe[src*="turnstile"]');
+          if (iframe) {
+            const parent = iframe.parentElement;
+            return parent && parent.querySelector('[class*="success"]');
           }
-          
-        } catch (err) {
-          logger.error(`Attempt ${attempt} error: ${err.message}`);
-          if (attempt < maxRetries) {
-            await sleep(10000);
-          }
+          return false;
+        });
+        
+        if (successIndicator) {
+          captchaSolved = true;
+          logger.success('Captcha solved!');
+          break;
+        }
+        
+        if (attempts % 10 === 0) {
+          logger.loading(`Still waiting... (${attempts}s)`);
         }
       }
       
-      if (!registered) {
-        logger.error(`Failed to register after ${maxRetries} attempts\n`);
-      } else {
-        logger.info('');
+      if (!captchaSolved) {
+        logger.error('Captcha timeout - please solve it faster next time');
+        await browser.close();
+        continue;
       }
+      
+      await sleep(2000);
+      
+      // Click submit/register button
+      logger.loading('Submitting registration...');
+      await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const submitBtn = buttons.find(btn => 
+          btn.textContent.includes('Submit') ||
+          btn.textContent.includes('Register') ||
+          btn.textContent.includes('Sign') ||
+          btn.textContent.includes('Continue')
+        );
+        if (submitBtn) submitBtn.click();
+      });
+      
+      await sleep(5000);
+      
+      // Check if registration was successful
+      const currentUrl = page.url();
+      logger.info(`Current URL: ${currentUrl}`);
+      
+      // Try to get session from cookies
+      const cookies = await page.cookies();
+      const sessionCookie = cookies.find(c => c.name === 'gfsessionid');
+      const sessionId = sessionCookie ? sessionCookie.value : null;
+      
+      logger.success(`✅ Wallet registered: ${address}`);
+      if (sessionId) {
+        logger.info(`Session ID: ${sessionId}`);
+      }
+      
+      const walletData = { address, privateKey, sessionId };
+      wallets.push(walletData);
+      
+      const existingWallets = fs.existsSync('wallets.json') 
+        ? JSON.parse(fs.readFileSync('wallets.json', 'utf8')) 
+        : [];
+      existingWallets.push(walletData);
+      fs.writeFileSync('wallets.json', JSON.stringify(existingWallets, null, 2));
+      
+      await browser.close();
+      logger.info('');
       
       if (i < count) {
         logger.info('Waiting 10 seconds before next wallet...\n');
@@ -309,7 +251,8 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
       }
       
     } catch (err) {
-      logger.error(`Error: ${err.message}\n`);
+      logger.error(`Error: ${err.message}`);
+      await browser.close();
     }
   }
   
@@ -320,7 +263,6 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
 
 async function main() {
   logger.banner();
-  initializeProxy();
   
   const rl = readline.createInterface({
     input: process.stdin,
@@ -330,15 +272,8 @@ async function main() {
   const question = (query) => new Promise(resolve => rl.question(query, resolve));
 
   try {
-    const inviteCode = process.env.INVITE_CODE || (fs.existsSync('code.txt') ? fs.readFileSync('code.txt', 'utf8').trim() : '');
-    const apikey = process.env.CAPTCHA_API_KEY || (fs.existsSync('key.txt') ? fs.readFileSync('key.txt', 'utf8').trim() : '');
-    
-    if (!apikey) {
-      logger.error('2Captcha API key not found!');
-      logger.error('Add to key.txt or .env as CAPTCHA_API_KEY');
-      rl.close();
-      return;
-    }
+    const inviteCode = process.env.INVITE_CODE || 
+      (fs.existsSync('code.txt') ? fs.readFileSync('code.txt', 'utf8').trim() : '');
     
     if (!inviteCode) {
       logger.error('Invite code not found!');
@@ -347,9 +282,8 @@ async function main() {
       return;
     }
     
-    const sitekey = '0x4AAAAAABpfyUqunlqwRBYN';
-    const pageurl = 'https://blockstreet.money/dashboard';
-
+    logger.info(`Invite Code: ${inviteCode}\n`);
+    
     const count = await question(`${colors.cyan}How many wallets to create? ${colors.reset}`);
     const numCount = parseInt(count);
     
@@ -359,7 +293,11 @@ async function main() {
       return;
     }
     
-    await autoReferral(inviteCode, apikey, sitekey, pageurl, numCount);
+    const mode = await question(`${colors.cyan}Run in headless mode? (y/n) [default: n] ${colors.reset}`);
+    const headless = mode.toLowerCase() === 'y';
+    
+    logger.info('');
+    await autoReferral(inviteCode, numCount, headless);
     
     rl.close();
   } catch (err) {
