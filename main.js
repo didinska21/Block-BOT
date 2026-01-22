@@ -331,19 +331,38 @@ async function autoReferral(inviteCode, apikey, count) {
       await sleep(4000);
       await takeDebugScreenshot(page, '04_after_connect', i);
       
-      // Select MetaMask with better detection
-      logger.loading('Selecting MetaMask...');
+      // Wait for modal and select MetaMask
+      logger.loading('Waiting for wallet modal...');
+      await sleep(2000);
+      
       const metaMaskResult = await page.evaluate(() => {
-        const elements = Array.from(document.querySelectorAll('*'));
+        // Look for MetaMask specifically in the modal
+        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a'));
         
-        for (let el of elements) {
-          const text = el.textContent.toLowerCase();
-          const hasMetaMask = text.includes('metamask') || text.includes('browser wallet');
+        for (let btn of buttons) {
+          const text = btn.textContent.trim();
+          console.log('Checking button:', text);
           
-          if (hasMetaMask && el.offsetParent !== null) {
-            console.log('Clicking MetaMask:', el.textContent.substring(0, 50));
+          // Check if this is the MetaMask button
+          if (text === 'MetaMask' || (text.includes('MetaMask') && text.length < 20)) {
+            console.log('Found MetaMask button, clicking...');
+            btn.click();
+            return { success: true, text: text };
+          }
+        }
+        
+        // Alternative: look for elements containing MetaMask logo/icon
+        const allElements = Array.from(document.querySelectorAll('*'));
+        for (let el of allElements) {
+          const innerHTML = el.innerHTML || '';
+          const text = el.textContent || '';
+          
+          if ((text.trim() === 'MetaMask' || innerHTML.includes('MetaMask')) && 
+              el.offsetParent !== null && 
+              el.clientHeight > 0) {
+            console.log('Found MetaMask element (alternative method)');
             el.click();
-            return { success: true, text: el.textContent.substring(0, 50) };
+            return { success: true, text: 'MetaMask (alternative)' };
           }
         }
         
@@ -351,11 +370,21 @@ async function autoReferral(inviteCode, apikey, count) {
       });
       
       logger.debug(`MetaMask selection: ${JSON.stringify(metaMaskResult)}`);
+      
+      if (!metaMaskResult.success) {
+        logger.warn('MetaMask button not found in modal!');
+      }
+      
       await sleep(4000);
       await takeDebugScreenshot(page, '05_after_metamask', i);
       
-      // Enter invite code
-      logger.loading('Entering invite code...');
+      // Wait for registration form/page after connecting
+      logger.loading('Waiting for registration form...');
+      await sleep(3000);
+      await takeDebugScreenshot(page, '06_registration_form', i);
+      
+      // Check if we need to enter invite code
+      logger.loading('Looking for invite code field...');
       const inviteResult = await page.evaluate((code) => {
         const inputs = Array.from(document.querySelectorAll('input'));
         console.log('Total inputs found:', inputs.length);
@@ -364,21 +393,23 @@ async function autoReferral(inviteCode, apikey, count) {
           const placeholder = (input.placeholder || '').toLowerCase();
           const name = (input.name || '').toLowerCase();
           const id = (input.id || '').toLowerCase();
+          const label = input.labels && input.labels[0] ? input.labels[0].textContent.toLowerCase() : '';
           
-          console.log('Input:', { placeholder, name, id, type: input.type });
+          console.log('Input:', { placeholder, name, id, label, type: input.type });
           
           if (placeholder.includes('invite') || placeholder.includes('code') || 
               placeholder.includes('referral') || name.includes('invite') || 
               name.includes('code') || name.includes('referral') ||
-              id.includes('invite') || id.includes('code')) {
+              id.includes('invite') || id.includes('code') ||
+              label.includes('invite') || label.includes('referral')) {
             
             console.log('Found invite field, entering code:', code);
             input.focus();
             input.value = code;
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.blur();
-            return { success: true, field: placeholder || name || id };
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+            return { success: true, field: placeholder || name || id || label };
           }
         }
         
@@ -388,45 +419,113 @@ async function autoReferral(inviteCode, apikey, count) {
       logger.debug(`Invite code entry: ${JSON.stringify(inviteResult)}`);
       
       if (inviteResult.success) {
-        logger.success(`Invite code entered in field: ${inviteResult.field}`);
+        logger.success(`Invite code entered in: ${inviteResult.field}`);
       } else {
-        logger.warn('Invite code field not found!');
+        logger.warn('No invite code field found - might not be needed or already filled');
       }
       
       await sleep(2000);
-      await takeDebugScreenshot(page, '06_after_invite', i);
+      await takeDebugScreenshot(page, '07_after_invite', i);
       
-      // Click submit/sign button
-      logger.loading('Submitting registration...');
-      const submitResult = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        console.log('Buttons for submit:', buttons.length);
-        
-        for (let btn of buttons) {
-          const text = btn.textContent.toLowerCase().trim();
-          const disabled = btn.disabled;
+      // Click submit/sign button - try multiple times if needed
+      logger.loading('Looking for submit/sign button...');
+      
+      let submitClicked = false;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const submitResult = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"]'));
+          console.log('Buttons found for submit:', buttons.length);
           
-          console.log('Submit button candidate:', { text, disabled });
-          
-          if (!disabled && (text.includes('submit') || text.includes('register') || 
-              text.includes('sign') || text.includes('continue') || 
-              text.includes('confirm') || text.includes('join'))) {
+          for (let btn of buttons) {
+            const text = btn.textContent.toLowerCase().trim();
+            const disabled = btn.disabled || btn.getAttribute('disabled') !== null;
+            const ariaDisabled = btn.getAttribute('aria-disabled') === 'true';
             
-            console.log('Clicking submit button:', btn.textContent);
-            btn.click();
-            return { success: true, text: btn.textContent };
+            console.log('Submit button candidate:', { 
+              text, 
+              disabled, 
+              ariaDisabled,
+              classes: btn.className 
+            });
+            
+            if (!disabled && !ariaDisabled && 
+                (text.includes('submit') || text.includes('register') || 
+                 text.includes('sign') || text.includes('continue') || 
+                 text.includes('confirm') || text.includes('join') ||
+                 text.includes('get started') || text === 'next')) {
+              
+              console.log('Clicking submit button:', btn.textContent);
+              btn.click();
+              return { success: true, text: btn.textContent.trim() };
+            }
           }
+          
+          return { success: false };
+        });
+        
+        logger.debug(`Submit attempt ${attempt}: ${JSON.stringify(submitResult)}`);
+        
+        if (submitResult.success) {
+          logger.success(`Submit button clicked: ${submitResult.text}`);
+          submitClicked = true;
+          break;
         }
         
-        return { success: false };
+        if (attempt < 3) {
+          logger.warn(`Submit button not found, waiting 2s and retrying...`);
+          await sleep(2000);
+        }
+      }
+      
+      if (!submitClicked) {
+        logger.warn('Could not find submit button after 3 attempts');
+      }
+      
+      await sleep(5000);
+      await takeDebugScreenshot(page, '08_after_submit', i);
+      
+      // Wait for potential signature request
+      logger.loading('Waiting for signature/confirmation...');
+      await sleep(3000);
+      
+      // Check if there's a signature popup or confirmation needed
+      const signatureCheck = await page.evaluate(() => {
+        const bodyText = document.body.textContent.toLowerCase();
+        return {
+          hasSignature: bodyText.includes('sign') && bodyText.includes('message'),
+          hasConfirm: bodyText.includes('confirm'),
+          hasApprove: bodyText.includes('approve')
+        };
       });
       
-      logger.debug(`Submit result: ${JSON.stringify(submitResult)}`);
-      await sleep(6000);
-      await takeDebugScreenshot(page, '07_after_submit', i);
+      logger.debug(`Signature check: ${JSON.stringify(signatureCheck)}`);
+      
+      if (signatureCheck.hasSignature || signatureCheck.hasConfirm || signatureCheck.hasApprove) {
+        logger.loading('Signature/confirmation detected, looking for button...');
+        
+        await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          for (let btn of buttons) {
+            const text = btn.textContent.toLowerCase();
+            if ((text.includes('sign') || text.includes('confirm') || text.includes('approve')) &&
+                !text.includes('cancel') && !text.includes('reject')) {
+              console.log('Clicking signature button:', btn.textContent);
+              btn.click();
+              return;
+            }
+          }
+        });
+        
+        await sleep(3000);
+      }
+      
+      await takeDebugScreenshot(page, '09_after_signature', i);
       
       // Get session and check success
       const cookies = await page.cookies();
+      logger.debug(`Cookies found: ${cookies.length}`);
+      cookies.forEach(c => logger.debug(`Cookie: ${c.name} = ${c.value.substring(0, 20)}...`));
+      
       const sessionCookie = cookies.find(c => c.name === 'gfsessionid');
       const sessionId = sessionCookie ? sessionCookie.value : null;
       
@@ -434,23 +533,43 @@ async function autoReferral(inviteCode, apikey, count) {
       const successCheck = await page.evaluate(() => {
         const url = window.location.href;
         const body = document.body.textContent.toLowerCase();
+        const title = document.title;
         
-        return {
+        // Check for success indicators
+        const indicators = {
           url,
+          title,
+          pathname: window.location.pathname,
           hasDashboard: body.includes('dashboard') || url.includes('dashboard'),
-          hasSuccess: body.includes('success') || body.includes('welcome'),
-          hasError: body.includes('error') || body.includes('failed'),
-          title: document.title
+          hasSuccess: body.includes('success') || body.includes('welcome') || body.includes('congratulations'),
+          hasComplete: body.includes('complete') || body.includes('registered'),
+          hasError: body.includes('error') || body.includes('failed') || body.includes('invalid'),
+          hasWalletConnected: body.includes('connected') || body.includes('wallet connected'),
+          // Check for task/reward elements that appear after successful registration
+          hasTasks: body.includes('daily login') || body.includes('invite a friend'),
+          hasTokens: body.includes('bsd token') || body.includes('earn'),
         };
+        
+        console.log('Success indicators:', indicators);
+        return indicators;
       });
       
-      logger.debug(`Success check: ${JSON.stringify(successCheck)}`);
+      logger.debug(`Success check: ${JSON.stringify(successCheck, null, 2)}`);
       logger.debug(`Session ID: ${sessionId || 'none'}`);
       
-      const isSuccess = successCheck.hasDashboard || successCheck.hasSuccess || 
-                       (sessionId !== null && !successCheck.hasError);
+      // Consider it successful if:
+      // 1. Has session ID AND no errors
+      // 2. Is on dashboard page
+      // 3. Has success/welcome message
+      // 4. Has task elements (Daily Login, Invite Friend, etc)
+      const isSuccess = (sessionId !== null && !successCheck.hasError) ||
+                       successCheck.hasDashboard || 
+                       successCheck.hasSuccess || 
+                       successCheck.hasComplete ||
+                       successCheck.hasTasks ||
+                       (successCheck.hasWalletConnected && !successCheck.hasError);
       
-      await takeDebugScreenshot(page, '08_final_state', i);
+      await takeDebugScreenshot(page, '10_final_state', i);
       
       if (isSuccess) {
         logger.success(`✅ Wallet registered successfully!`);
