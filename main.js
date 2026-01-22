@@ -202,7 +202,35 @@ async function countdown(hours) {
   console.log('\n');
 }
 
-// Auto Referral Function
+// Test Endpoint Function
+async function testEndpoint() {
+  logger.loading('Testing API endpoint...');
+  const ua = randomUA();
+  const api = createAxios(null, ua);
+  
+  try {
+    const res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
+      headers: {
+        'Origin': 'https://blockstreet.money',
+        'Referer': 'https://blockstreet.money/',
+        'Cookie': 'gfsessionid='
+      }
+    });
+    
+    logger.success('API Endpoint OK!');
+    logger.info(`Response: ${JSON.stringify(res.data)}`);
+    return true;
+  } catch (err) {
+    logger.error('API Endpoint Error: ' + err.message);
+    if (err.response) {
+      logger.error(`Status: ${err.response.status}`);
+      logger.error(`Data: ${JSON.stringify(err.response.data)}`);
+    }
+    return false;
+  }
+}
+
+// Auto Referral Function - UPDATED
 async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
   logger.step(`Starting Auto Referral - Creating ${count} wallets`);
   
@@ -220,22 +248,35 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
     const api = createAxios(proxy, ua);
 
     try {
+      // Step 1: Get nonce dengan headers yang lebih lengkap
       let res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
-        headers: { ...api.defaults.headers, 'Cookie': 'gfsessionid=' }
+        headers: { 
+          ...api.defaults.headers,
+          'Origin': 'https://blockstreet.money',
+          'Referer': 'https://blockstreet.money/',
+          'Cookie': 'gfsessionid='
+        }
       });
       
       const sessionId = extractSessionId(res);
       const nonce = res.data.data.signnonce;
+      
+      logger.info(`Got nonce: ${nonce.substring(0, 10)}...`);
 
+      // Step 2: Buat signature
       const now = new Date();
       const issuedAt = now.toISOString();
       const expirationTime = new Date(now.getTime() + 120000).toISOString();
       
       const message = `blockstreet.money wants you to sign in with your Ethereum account:\n${address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${nonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
       const signature = await wallet.signMessage(message);
+      
+      logger.info(`Signature created`);
 
+      // Step 3: Solve Captcha
       const token = await solve2Captcha(apikey, sitekey, pageurl);
 
+      // Step 4: Register dengan token di body DAN header
       const body = {
         address,
         nonce,
@@ -243,27 +284,103 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
         chainId: 1,
         issuedAt,
         expirationTime,
-        invite_code: inviteCode
+        invite_code: inviteCode,
+        'cf-turnstile-response': token  // Token di body
       };
       
       const postHeaders = {
         ...api.defaults.headers,
         'Content-Type': 'application/json',
-        'Cf-Turnstile-Response': token,
+        'Origin': 'https://blockstreet.money',
+        'Referer': 'https://blockstreet.money/',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Cf-Turnstile-Response': token,  // Token di header juga
         'Cookie': sessionId ? `gfsessionid=${sessionId}` : 'gfsessionid='
       };
       
-      res = await axios.post('https://api.blockstreet.money/api/account/signverify', body, { headers: postHeaders });
+      // Tambah delay sebelum request
+      logger.info('Waiting 2 seconds before registration...');
+      await sleep(2000);
+      
+      logger.loading('Sending registration request...');
+      res = await axios.post('https://api.blockstreet.money/api/account/signverify', body, { 
+        headers: postHeaders,
+        timeout: 30000
+      }).catch(err => {
+        if (err.response) {
+          logger.error(`Response Code: ${err.response.data.code}`);
+          logger.error(`Response Message: ${err.response.data.message}`);
+          logger.error(`Full Response: ${JSON.stringify(err.response.data)}`);
+          logger.error(`Status: ${err.response.status}`);
+        }
+        throw err;
+      });
       
       if (res.data.code !== 0) {
         logger.error(`Registration failed: ${JSON.stringify(res.data)}`);
-        continue;
+        
+        // Jika error 5020, coba ulang dengan session baru
+        if (res.data.code === 5020) {
+          logger.warn('Error 5020 - Retrying with fresh session...');
+          await sleep(5000);
+          
+          // Get new nonce
+          logger.loading('Getting new nonce...');
+          res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
+            headers: { 
+              ...api.defaults.headers,
+              'Origin': 'https://blockstreet.money',
+              'Referer': 'https://blockstreet.money/',
+              'Cookie': 'gfsessionid='
+            }
+          });
+          
+          const newSessionId = extractSessionId(res);
+          const newNonce = res.data.data.signnonce;
+          
+          logger.info(`New nonce: ${newNonce.substring(0, 10)}...`);
+          
+          // New signature
+          const newMessage = `blockstreet.money wants you to sign in with your Ethereum account:\n${address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${newNonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
+          const newSignature = await wallet.signMessage(newMessage);
+          
+          // New captcha
+          const newToken = await solve2Captcha(apikey, sitekey, pageurl);
+          
+          body.nonce = newNonce;
+          body.signature = newSignature;
+          body['cf-turnstile-response'] = newToken;
+          postHeaders['Cf-Turnstile-Response'] = newToken;
+          postHeaders['Cookie'] = newSessionId ? `gfsessionid=${newSessionId}` : 'gfsessionid=';
+          
+          await sleep(2000);
+          logger.loading('Retrying registration...');
+          
+          res = await axios.post('https://api.blockstreet.money/api/account/signverify', body, { 
+            headers: postHeaders,
+            timeout: 30000
+          }).catch(err => {
+            if (err.response) {
+              logger.error(`Retry Response: ${JSON.stringify(err.response.data)}`);
+            }
+            throw err;
+          });
+          
+          if (res.data.code !== 0) {
+            logger.error(`Retry failed: ${JSON.stringify(res.data)}`);
+            continue;
+          }
+        } else {
+          continue;
+        }
       }
 
       const newSessionId = extractSessionId(res);
       const finalSessionId = newSessionId || sessionId;
 
-      logger.success(`[${i}/${count}] Registered: ${address}`);
+      logger.success(`[${i}/${count}] ✅ Registered: ${address}`);
+      logger.info(`Session ID: ${finalSessionId}`);
       
       const walletData = { address, privateKey, sessionId: finalSessionId };
       wallets.push(walletData);
@@ -273,11 +390,14 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
       fs.writeFileSync('wallets.json', JSON.stringify(existingWallets, null, 2));
       
       if (i < count) {
-        logger.info('Waiting 3 seconds...');
-        await sleep(3000);
+        logger.info('Waiting 5 seconds before next wallet...');
+        await sleep(5000);
       }
     } catch (err) {
       logger.error(`Error for wallet ${i}: ${err.message}`);
+      if (err.response) {
+        logger.error(`Details: ${JSON.stringify(err.response.data)}`);
+      }
     }
   }
   
@@ -312,7 +432,7 @@ function loadWallets() {
     return wallets;
   }
   
-  // Priority 2: Load from wallets.json (from Auto Referral)
+  // Priority 2: Load from wallets.json
   if (fs.existsSync('wallets.json')) {
     const jsonWallets = JSON.parse(fs.readFileSync('wallets.json', 'utf8'));
     wallets = jsonWallets.map(w => {
@@ -619,74 +739,4 @@ async function main() {
     output: process.stdout,
   });
 
-  const question = (query) => new Promise(resolve => rl.question(query, resolve));
-
-  try {
-    const inviteCode = process.env.INVITE_CODE || (fs.existsSync('code.txt') ? fs.readFileSync('code.txt', 'utf8').trim() : '');
-    const apikey = process.env.CAPTCHA_API_KEY || (fs.existsSync('key.txt') ? fs.readFileSync('key.txt', 'utf8').trim() : '');
-    
-    if (!apikey) {
-      logger.error('2Captcha API key not found!');
-      logger.error('Please add it to:');
-      logger.error('  - key.txt file, OR');
-      logger.error('  - .env file as CAPTCHA_API_KEY=your_key');
-      rl.close();
-      return;
-    }
-    
-    const sitekey = '0x4AAAAAABpfyUqunlqwRBYN';
-    const pageurl = 'https://blockstreet.money/dashboard';
-
-    while (true) {
-      console.log(`\n${colors.bold}${colors.cyan}╔═══════════════════════════════════════════╗`);
-      console.log(`║              MAIN MENU                    ║`);
-      console.log(`╚═══════════════════════════════════════════╝${colors.reset}\n`);
-      console.log(`${colors.white}1. Auto Referral (Create Multiple Wallets)`);
-      console.log(`2. Login & Auto Swap`);
-      console.log(`3. Run All Features (Loop every 12 hours)`);
-      console.log(`4. Exit${colors.reset}\n`);
-
-      const choice = await question(`${colors.cyan}Select option [1-4]: ${colors.reset}`);
-
-      if (choice === '1') {
-        if (!inviteCode) {
-          logger.error('Invite code not found!');
-          logger.error('Please add it to:');
-          logger.error('  - code.txt file, OR');
-          logger.error('  - .env file as INVITE_CODE=your_code');
-          continue;
-        }
-        
-        const count = await question(`${colors.white}How many wallets to create? ${colors.reset}`);
-        const walletCount = parseInt(count);
-        
-        if (isNaN(walletCount) || walletCount <= 0) {
-          logger.error('Invalid number!');
-          continue;
-        }
-        
-        await autoReferral(inviteCode, apikey, sitekey, pageurl, walletCount);
-        
-      } else if (choice === '2') {
-        await loginAndSwap(apikey, sitekey, pageurl);
-        
-      } else if (choice === '3') {
-        await runAllFeatures(apikey, sitekey, pageurl, true);
-        
-      } else if (choice === '4') {
-        logger.info('Exiting... Goodbye! 👋');
-        rl.close();
-        break;
-        
-      } else {
-        logger.error('Invalid option! Please select 1-4');
-      }
-    }
-    
-  } catch (err) {
-    logger.error(`Error: ${err.message}`);
-    rl.close();
-  }
-}
-
-main();
+  const question = (query) =>
