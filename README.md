@@ -1,3 +1,5 @@
 # Block-BOT
 
-```npm install axios ethers https-proxy-agent```
+```bash
+npm install axios ethers https-proxy-agent
+```
