@@ -129,7 +129,6 @@ function extractSessionId(response) {
   return null;
 }
 
-// 2Captcha Turnstile Solver
 async function solve2Captcha(apikey, sitekey, pageurl) {
   logger.loading('Solving Turnstile with 2Captcha...');
   
@@ -202,7 +201,6 @@ async function countdown(hours) {
   console.log('\n');
 }
 
-// Test Endpoint Function
 async function testEndpoint() {
   logger.loading('Testing API endpoint...');
   const ua = randomUA();
@@ -230,7 +228,6 @@ async function testEndpoint() {
   }
 }
 
-// Auto Referral Function - UPDATED
 async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
   logger.step(`Starting Auto Referral - Creating ${count} wallets`);
   
@@ -248,7 +245,6 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
     const api = createAxios(proxy, ua);
 
     try {
-      // Step 1: Get nonce dengan headers yang lebih lengkap
       let res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
         headers: { 
           ...api.defaults.headers,
@@ -263,7 +259,6 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
       
       logger.info(`Got nonce: ${nonce.substring(0, 10)}...`);
 
-      // Step 2: Buat signature
       const now = new Date();
       const issuedAt = now.toISOString();
       const expirationTime = new Date(now.getTime() + 120000).toISOString();
@@ -273,10 +268,8 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
       
       logger.info(`Signature created`);
 
-      // Step 3: Solve Captcha
       const token = await solve2Captcha(apikey, sitekey, pageurl);
 
-      // Step 4: Register dengan token di body DAN header
       const body = {
         address,
         nonce,
@@ -285,7 +278,7 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
         issuedAt,
         expirationTime,
         invite_code: inviteCode,
-        'cf-turnstile-response': token  // Token di body
+        'cf-turnstile-response': token
       };
       
       const postHeaders = {
@@ -295,11 +288,10 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
         'Referer': 'https://blockstreet.money/',
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
-        'Cf-Turnstile-Response': token,  // Token di header juga
+        'Cf-Turnstile-Response': token,
         'Cookie': sessionId ? `gfsessionid=${sessionId}` : 'gfsessionid='
       };
       
-      // Tambah delay sebelum request
       logger.info('Waiting 2 seconds before registration...');
       await sleep(2000);
       
@@ -320,12 +312,10 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
       if (res.data.code !== 0) {
         logger.error(`Registration failed: ${JSON.stringify(res.data)}`);
         
-        // Jika error 5020, coba ulang dengan session baru
         if (res.data.code === 5020) {
           logger.warn('Error 5020 - Retrying with fresh session...');
           await sleep(5000);
           
-          // Get new nonce
           logger.loading('Getting new nonce...');
           res = await api.get('https://api.blockstreet.money/api/account/signnonce', {
             headers: { 
@@ -341,11 +331,9 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
           
           logger.info(`New nonce: ${newNonce.substring(0, 10)}...`);
           
-          // New signature
           const newMessage = `blockstreet.money wants you to sign in with your Ethereum account:\n${address}\n\nWelcome to Block Street\n\nURI: https://blockstreet.money\nVersion: 1\nChain ID: 1\nNonce: ${newNonce}\nIssued At: ${issuedAt}\nExpiration Time: ${expirationTime}`;
           const newSignature = await wallet.signMessage(newMessage);
           
-          // New captcha
           const newToken = await solve2Captcha(apikey, sitekey, pageurl);
           
           body.nonce = newNonce;
@@ -405,11 +393,9 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
   return wallets;
 }
 
-// Load Wallets from .env or wallets.json
 function loadWallets() {
   let wallets = [];
   
-  // Priority 1: Load from .env file
   const envKeys = Object.keys(process.env).filter(key => key.startsWith('PRIVATE_KEY_'));
   
   if (envKeys.length > 0) {
@@ -432,7 +418,6 @@ function loadWallets() {
     return wallets;
   }
   
-  // Priority 2: Load from wallets.json
   if (fs.existsSync('wallets.json')) {
     const jsonWallets = JSON.parse(fs.readFileSync('wallets.json', 'utf8'));
     wallets = jsonWallets.map(w => {
@@ -455,7 +440,6 @@ function loadWallets() {
   return wallets;
 }
 
-// Login & Auto Swap Function
 async function loginAndSwap(apikey, sitekey, pageurl) {
   logger.step('Starting Login & Auto Swap');
   
@@ -484,7 +468,6 @@ async function loginAndSwap(apikey, sitekey, pageurl) {
     };
 
     try {
-      // Get token list
       let res = await axios.get('https://api.blockstreet.money/api/swap/token_list', { headers: baseHeaders });
       const tokens = res.data.data || [];
       
@@ -493,11 +476,9 @@ async function loginAndSwap(apikey, sitekey, pageurl) {
         continue;
       }
       
-      // Get assets
       res = await axios.get('https://api.blockstreet.money/api/account/assets', { headers: baseHeaders });
       const assets = res.data.data || [];
       
-      // Perform 3 random swaps
       for (let j = 0; j < 3; j++) {
         try {
           const fromToken = tokens[Math.floor(Math.random() * tokens.length)];
@@ -541,7 +522,6 @@ async function loginAndSwap(apikey, sitekey, pageurl) {
   logger.success('Login & Auto Swap completed!');
 }
 
-// Run All Features Function
 async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
   logger.step('Starting Run All Features');
   
@@ -571,11 +551,9 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
       };
 
       try {
-        // Get token list
         let res = await axios.get('https://api.blockstreet.money/api/swap/token_list', { headers: baseHeaders });
         const tokens = res.data.data || [];
         
-        // Get assets
         res = await axios.get('https://api.blockstreet.money/api/account/assets', { headers: baseHeaders });
         const assets = res.data.data || [];
         
@@ -584,7 +562,6 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
           logger.info(`  ${asset.symbol}: ${asset.available_amount}`);
         });
 
-        // 1. Swap (3x)
         logger.loading('Performing 3 swaps...');
         for (let j = 0; j < 3; j++) {
           try {
@@ -613,7 +590,6 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
           }
         }
 
-        // 2. Supply
         logger.loading('Performing supply...');
         const bsdAsset = assets.find(a => a.symbol === 'BSD');
         if (bsdAsset && parseFloat(bsdAsset.available_amount) >= 1) {
@@ -634,7 +610,6 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
           logger.warn('  Not enough BSD for supply');
         }
 
-        // 3. Borrow
         logger.loading('Performing borrow...');
         try {
           res = await axios.get('https://api.blockstreet.money/api/market/borrow', { headers: baseHeaders });
@@ -658,7 +633,6 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
           logger.error(`  Borrow failed: ${err.message}`);
         }
 
-        // 4. Repay
         logger.loading('Performing repay...');
         try {
           res = await axios.get('https://api.blockstreet.money/api/my/borrow', { headers: baseHeaders });
@@ -684,7 +658,6 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
           logger.error(`  Repay failed: ${err.message}`);
         }
 
-        // 5. Withdraw
         logger.loading('Performing withdraw...');
         try {
           res = await axios.get('https://api.blockstreet.money/api/my/supply', { headers: baseHeaders });
@@ -729,7 +702,6 @@ async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
   } while (loopMode);
 }
 
-// Main Menu
 async function main() {
   logger.banner();
   initializeProxy();
@@ -739,4 +711,23 @@ async function main() {
     output: process.stdout,
   });
 
-  const question = (query) =>
+  const question = (query) => new Promise(resolve => rl.question(query, resolve));
+
+  try {
+    const inviteCode = process.env.INVITE_CODE || (fs.existsSync('code.txt') ? fs.readFileSync('code.txt', 'utf8').trim() : '');
+    const apikey = process.env.CAPTCHA_API_KEY || (fs.existsSync('key.txt') ? fs.readFileSync('key.txt', 'utf8').trim() : '');
+    
+    if (!apikey) {
+      logger.error('2Captcha API key not found!');
+      logger.error('Please add it to:');
+      logger.error('  - key.txt file, OR');
+      logger.error('  - .env file as CAPTCHA_API_KEY=your_key');
+      rl.close();
+      return;
+    }
+    
+    const sitekey = '0x4AAAAAABpfyUqunlqwRBYN';
+    const pageurl = 'https://blockstreet.money/dashboard';
+
+    while (true) {
+      console.
