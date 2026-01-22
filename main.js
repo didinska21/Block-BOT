@@ -282,16 +282,59 @@ async function autoReferral(inviteCode, apikey, sitekey, pageurl, count) {
   return wallets;
 }
 
+// Load Wallets from wallets.json or privatekeys.txt
+function loadWallets() {
+  let wallets = [];
+  
+  // Try to load from wallets.json first
+  if (fs.existsSync('wallets.json')) {
+    wallets = JSON.parse(fs.readFileSync('wallets.json', 'utf8'));
+    logger.info(`Loaded ${wallets.length} wallet(s) from wallets.json`);
+    return wallets;
+  }
+  
+  // If not found, try privatekeys.txt
+  if (fs.existsSync('privatekeys.txt')) {
+    const lines = fs.readFileSync('privatekeys.txt', 'utf8').trim().split('\n').filter(Boolean);
+    wallets = lines.map(pk => {
+      try {
+        const wallet = new ethers.Wallet(pk.trim());
+        return {
+          address: wallet.address,
+          privateKey: wallet.privateKey,
+          sessionId: null
+        };
+      } catch (err) {
+        logger.error(`Invalid private key: ${pk.substring(0, 10)}...`);
+        return null;
+      }
+    }).filter(Boolean);
+    
+    logger.info(`Loaded ${wallets.length} wallet(s) from privatekeys.txt`);
+    
+    // Save to wallets.json for future use
+    fs.writeFileSync('wallets.json', JSON.stringify(wallets, null, 2));
+    logger.success('Saved to wallets.json');
+    
+    return wallets;
+  }
+  
+  return wallets;
+}
+
 // Login & Auto Swap Function
 async function loginAndSwap(apikey, sitekey, pageurl) {
   logger.step('Starting Login & Auto Swap');
   
-  if (!fs.existsSync('wallets.json')) {
-    logger.error('wallets.json not found! Please run Auto Referral first.');
+  const wallets = loadWallets();
+  
+  if (wallets.length === 0) {
+    logger.error('No wallets found! Please:');
+    logger.error('1. Run Auto Referral (Menu 1), OR');
+    logger.error('2. Create privatekeys.txt with your private keys');
     return;
   }
   
-  const wallets = JSON.parse(fs.readFileSync('wallets.json', 'utf8'));
   logger.info(`Found ${wallets.length} wallet(s)`);
   
   for (let i = 0; i < wallets.length; i++) {
@@ -369,13 +412,16 @@ async function loginAndSwap(apikey, sitekey, pageurl) {
 async function runAllFeatures(apikey, sitekey, pageurl, loopMode = false) {
   logger.step('Starting Run All Features');
   
-  if (!fs.existsSync('wallets.json')) {
-    logger.error('wallets.json not found! Please run Auto Referral first.');
-    return;
-  }
-  
   do {
-    const wallets = JSON.parse(fs.readFileSync('wallets.json', 'utf8'));
+    const wallets = loadWallets();
+    
+    if (wallets.length === 0) {
+      logger.error('No wallets found! Please:');
+      logger.error('1. Run Auto Referral (Menu 1), OR');
+      logger.error('2. Create privatekeys.txt with your private keys');
+      return;
+    }
+    
     logger.info(`Processing ${wallets.length} wallet(s)...`);
     
     for (let i = 0; i < wallets.length; i++) {
